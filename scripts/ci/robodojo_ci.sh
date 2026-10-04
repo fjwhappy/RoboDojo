@@ -24,6 +24,10 @@ Commands:
   check-gpu      Verify nvidia-smi on the host and GPU access inside a container
   ensure-image   Build robodojo:<tag> if missing (or ROBODOJO_REBUILD_IMAGE=true)
   check-assets   Verify the persistent Assets dir has Robots/Object/Material/Eval_Layout
+  ensure-assets  Download Assets into ROBODOJO_ASSETS_DIR unless already cached (idempotent)
+  start-client   Start the client container DETACHED and return; if one is already
+                 running for the same container name, print its info and exit 0
+  client-status  Print state, image, start time and recent logs of the client container
   doctor         Run `robodojo.sh doctor --skip-policy` inside the image
   wait-server    Wait until POLICY_HOST:POLICY_PORT accepts TCP connections
   run-task       Run one task in the client container, then verify _result.json
@@ -45,12 +49,15 @@ Environment (defaults in brackets):
                             "--build-arg CUDA_IMAGE=<mirror>/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
   ROBODOJO_ASSETS_DIR       persistent Assets dir [<repo>/Assets]
   ROBODOJO_ASSETS_BAKED_DIR Assets path baked into curobo configs [auto-detected]
+  ROBODOJO_HF_ENDPOINT      Hugging Face endpoint for ensure-assets [https://huggingface.co]
+                            (e.g. https://hf-mirror.com where huggingface.co is blocked)
   ROBODOJO_CACHE_DIR        persistent Isaac/warp cache root [~/.cache/robodojo-ci]
   ROBODOJO_OUTPUT_DIR       host dir mounted as eval_result [<repo>/eval_result]
   ROBODOJO_SERVER_WAIT      seconds to wait for the policy server [300]
   ROBODOJO_MAX_BASH_RETRIES client self-restart attempts [2]
   ROBODOJO_RUN_ID           result folder name [current timestamp]
   ROBODOJO_CONTAINER_NAME   client container name [robodojo-client-<task>]
+  ROBODOJO_CLIENT_LOG_DIR   start-client: host dir for client.log [<output>/_ci/<task>]
   TASK, POLICY_NAME, POLICY_HOST, POLICY_PORT, CKPT [external], EVAL_NUM [1],
   ACTION_TYPE [ee], ENV_CFG [arx_x5], SEED [0], ENV_GPU [0]
   ROBODOJO_REPORT_DIR       report: dir searched for status.json [ROBODOJO_OUTPUT_DIR]
@@ -266,6 +273,30 @@ cmd_check_assets() {
   info "Assets OK: ${assets} (curobo baked path: $(detect_baked_assets_dir))"
 }
 
+cmd_ensure_assets() {
+  local assets
+  assets="$(resolve_assets_dir)"
+  [[ "$(basename "${assets}")" == "Assets" ]] || \
+    error "ROBODOJO_ASSETS_DIR must point at a directory named 'Assets' (got ${assets})"
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    echo "[dry-run] python3 scripts/ci/download_assets.py --assets-dir ${assets}"
+    return 0
+  fi
+  # Fast path: already complete (marker written by download_assets.py) or a
+  # pre-existing, manually prepared Assets dir with all required subdirs.
+  if python3 "${SCRIPT_DIR}/download_assets.py" --assets-dir "${assets}" --check-only; then
+    return 0
+  fi
+  if [[ -d "${assets}/Robots" && -d "${assets}/Object" && -d "${assets}/Material" && -d "${assets}/Eval_Layout" \
+        && ! -d "$(dirname "${assets}")/.git" ]]; then
+    info "Using existing Assets at ${assets} (prepared outside this script); skipping download"
+    return 0
+  fi
+  info "Assets not cached at ${assets}; downloading (resumable)"
+  local endpoint="${ROBODOJO_HF_ENDPOINT:-https://huggingface.co}"
+  python3 "${SCRIPT_DIR}/download_assets.py" --assets-dir "${assets}" --endpoint "${endpoint}"
+}
+
 cmd_doctor() {
   build_mounts
   run docker run --rm --gpus all --network host --ipc host "${MOUNTS[@]}" "${IMAGE}" \
@@ -421,6 +452,95 @@ PY
   info "PASS ${TASK}: ${result_json}"
 }
 
+client_state() {
+  docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || true
+}
+
+cmd_client_status() {
+  local name state
+  name="$(container_name)"
+  state="$(client_state "${name}")"
+  if [[ -z "${state}" ]]; then
+    info "No client container named ${name}"
+    return 0
+  fi
+  docker inspect -f 'name={{.Name}} state={{.State.Status}} image={{.Config.Image}} started={{.State.StartedAt}} exit={{.State.ExitCode}}' "${name}"
+  docker inspect -f '{{range .Mounts}}{{if eq .Destination "/workspace/RoboDojo/eval_result"}}results={{.Source}}{{end}}{{end}}' "${name}"
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${name}" | grep -E '^ROBODOJO_RUN_ID=' || true
+  echo "--- last 20 log lines ---"
+  docker logs --tail 20 "${name}" 2>&1 || true
+}
+
+# Start the client container in the background and return immediately.
+cmd_start_client() {
+  require TASK POLICY_NAME POLICY_HOST POLICY_PORT
+  local name state run_id log_dir
+  name="$(container_name)"
+
+  if [[ "${DRY_RUN}" != "true" ]]; then
+    state="$(client_state "${name}")"
+    case "${state}" in
+      running|restarting|created)
+        info "Client container ${name} is already ${state}; not starting another one"
+        cmd_client_status
+        return 0
+        ;;
+      "") ;;
+      *)
+        info "Removing previous ${state} container ${name}"
+        docker rm -f "${name}" >/dev/null 2>&1 || true
+        ;;
+    esac
+  fi
+
+  run_id="${ROBODOJO_RUN_ID:-$(date +%Y-%m-%d_%H-%M-%S)}"
+  log_dir="${ROBODOJO_CLIENT_LOG_DIR:-${OUTPUT_DIR}/_ci/${TASK}}"
+  build_mounts
+  if [[ "${DRY_RUN}" != "true" ]]; then
+    # Create host dirs as the runner user before docker can create them as root.
+    mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+    if ! mkdir -p "${log_dir}" 2>/dev/null; then
+      # A previous root-owned container left OUTPUT_DIR unwritable; hand it back.
+      docker run --rm --entrypoint chown -v "${OUTPUT_DIR}:/out" "${IMAGE}" -R "$(id -u):$(id -g)" /out
+      mkdir -p "${log_dir}"
+    fi
+  fi
+
+  # No --rm: the container (and its logs) outlive this script/the CI job.
+  # shellcheck disable=SC2016  # expanded inside the container, not here
+  local inner='bash scripts/robodojo.sh client "$@" 2>&1 | tee /workspace/ci_log/client.log; exit "${PIPESTATUS[0]}"'
+  local docker_args=(
+    docker run -d --name "${name}"
+    --label "robodojo.client=1" --label "robodojo.task=${TASK}" --label "robodojo.run_id=${run_id}"
+    --gpus all --network host --ipc host
+    -e "ROBODOJO_RUN_ID=${run_id}"
+    -e "ROBODOJO_MAX_BASH_RETRIES=${ROBODOJO_MAX_BASH_RETRIES:-2}"
+    "${MOUNTS[@]}"
+    -v "${OUTPUT_DIR}:/workspace/RoboDojo/eval_result"
+    -v "${log_dir}:/workspace/ci_log"
+    "${IMAGE}"
+    bash -c "${inner}" _
+    --task "${TASK}" --policy-name "${POLICY_NAME}"
+    --policy-host "${POLICY_HOST}" --policy-port "${POLICY_PORT}"
+    --ckpt "${CKPT}" --eval-num "${EVAL_NUM}" --action-type "${ACTION_TYPE}"
+    --env-cfg "${ENV_CFG}" --seed "${SEED}" --env-gpu "${ENV_GPU}"
+  )
+  run "${docker_args[@]}"
+  [[ "${DRY_RUN}" == "true" ]] && return 0
+
+  sleep "${ROBODOJO_START_CHECK_SECONDS:-15}"
+  state="$(client_state "${name}")"
+  if [[ "${state}" != "running" ]]; then
+    docker logs --tail 50 "${name}" 2>&1 || true
+    error "client container ${name} is '${state:-missing}' right after start"
+  fi
+  info "Client started in background: ${name} (run_id=${run_id})"
+  echo "  results : ${OUTPUT_DIR}/RoboDojo/${TASK}/${POLICY_NAME}/"
+  echo "  log     : ${log_dir}/client.log"
+  echo "  follow  : docker logs -f ${name}"
+  echo "  stop    : docker rm -f ${name}"
+}
+
 cmd_report() {
   local dir="${ROBODOJO_REPORT_DIR:-${OUTPUT_DIR}}"
   python3 - "${dir}" <<'PY'
@@ -461,6 +581,9 @@ case "${COMMAND}" in
   check-gpu) cmd_check_gpu ;;
   ensure-image) cmd_ensure_image ;;
   check-assets) cmd_check_assets ;;
+  ensure-assets) cmd_ensure_assets ;;
+  start-client) cmd_start_client ;;
+  client-status) cmd_client_status ;;
   doctor) cmd_doctor ;;
   wait-server) cmd_wait_server ;;
   run-task) cmd_run_task ;;

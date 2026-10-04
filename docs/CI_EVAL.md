@@ -52,6 +52,9 @@ Then set these **repository (or organization) variables**
 | `ROBODOJO_ENV_CFG` | *(optional, `arx_x5`)* | env_cfg stem |
 | `ROBODOJO_ENV_GPU` | *(optional, `0`)* | Isaac Sim GPU id on the runner |
 | `ROBODOJO_IMAGE_TAG` | *(optional, `cuda12.8`)* | Client image `robodojo:<tag>` |
+| `ROBODOJO_OUTPUT_DIR` | *(optional, `~/robodojo-eval_result`)* | Persistent results dir for background clients |
+| `ROBODOJO_HF_ENDPOINT` | *(optional, `https://huggingface.co`)* | Asset download endpoint, e.g. `https://hf-mirror.com` |
+| `ROBODOJO_GIT_MIRROR_DIR` | *(optional)* | Dir of bare submodule mirrors (`XPolicyLab.git`, `IsaacLab.git`, `curobo.git`) |
 | `ROBODOJO_CUDA_CHECK_IMAGE` | *(optional)* | CUDA image for the GPU check, e.g. `docker.m.daocloud.io/nvidia/cuda:12.8.1-base-ubuntu22.04` when Docker Hub is blocked |
 | `ROBODOJO_BUILD_ARGS` | *(optional)* | Extra `docker build` args, e.g. `--build-arg CUDA_IMAGE=docker.m.daocloud.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04` |
 
@@ -108,23 +111,38 @@ then call this one.
 
 ## 3. What the workflow does
 
-1. **prepare**: checks out the repo with submodules, validates inputs and resolves the task
-   list (`scripts/ci/resolve_eval_inputs.py`), checks the policy adapter exists, checks the GPU
-   on the host and in a container, builds the image if missing, checks the assets, and runs
-   `robodojo.sh doctor` inside the image.
-2. **eval**: a matrix with one job per task and `max-parallel: 1`, since one Isaac Sim fits on
-   a GPU. Each job waits for the policy server port and runs the client container
-   (`scripts/ci/robodojo_ci.sh run-task`). The container is always removed afterwards. A task
-   passes only if the client exits `0` **and** a `_result.json` from this run has
-   `eval_time >= 1`. Results and `client.log` are uploaded as the `result-<task>` artifact.
-3. **summarize**: merges the artifacts, writes a PASS/FAIL table (and the
-   `summarize_result.py` leaderboard table if enough episodes exist) to the job summary, and
-   uploads `robodojo-eval-summary`.
+A single job, **start-client**, starts the evaluation client **in the background** and finishes.
+It does not wait for the evaluation to complete.
 
-Runs share the concurrency group `robodojo-gpu-eval`, so they queue instead of competing for
-the GPU. The workflow has no `push`/`pull_request` triggers, so a self-hosted runner never
-executes fork code. Inputs reach scripts only through environment variables and are validated
-first.
+1. Checks out the repo (falling back to an API tarball if github.com git is unreachable) and
+   fills in the submodules from the local mirrors in `ROBODOJO_GIT_MIRROR_DIR`, or from GitHub.
+2. Validates the inputs and resolves the task list.
+3. **Already running?** If a container `robodojo-client-<policy>-<task>` is running for every
+   requested task, prints its status and recent logs, then ends successfully. Nothing else runs.
+4. Otherwise it checks the GPU, then reuses whatever is cached:
+   - **Client image:** `robodojo:<tag>` is built only if it's missing or `rebuild_image` is set.
+   - **Assets:** `ensure-assets` returns immediately when `ROBODOJO_ASSETS_DIR` is complete.
+     The marker is `<parent>/.robodojo_assets_complete`, and a manually prepared Assets dir
+     also counts. Otherwise it downloads the assets once (resumable, from
+     `ROBODOJO_HF_ENDPOINT`, e.g. `https://hf-mirror.com`) and writes the marker.
+5. Waits for the policy server port.
+6. Starts one **detached** container per task (`docker run -d`, no `--rm`). Results go to
+   `ROBODOJO_OUTPUT_DIR` on the runner, and the client log to
+   `<ROBODOJO_OUTPUT_DIR>/_ci/<task>/client.log`. A summary table lists each task as
+   `started` or `already running`.
+
+Watch or stop a client on the runner:
+
+```bash
+docker ps --filter label=robodojo.client=1
+docker logs -f robodojo-client-<policy>-<task>
+TASK=<task> ROBODOJO_CONTAINER_NAME=robodojo-client-<policy>-<task> bash scripts/ci/robodojo_ci.sh client-status
+docker rm -f robodojo-client-<policy>-<task>
+```
+
+Runs share the concurrency group `robodojo-gpu-eval`, so two start requests never race.
+Several tasks started in one run share GPU `ROBODOJO_ENV_GPU`, so keep task lists small, or
+start one task per run.
 
 ## 4. Running the same steps locally
 

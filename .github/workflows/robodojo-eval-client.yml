@@ -1,6 +1,9 @@
-# Deploy the RoboDojo simulator container on a self-hosted GPU runner and run it
-# as the evaluation *client* against an external policy server (e.g. Pi_05).
-# The policy server is NOT hosted by this workflow. Runner setup: docs/CI_EVAL.md
+# Start the RoboDojo evaluation client (simulator container) on a self-hosted GPU
+# runner, DETACHED, against an external policy server (e.g. Pi_05), then finish.
+# - If a client container for the task is already running, print its info and finish.
+# - Assets, the client image, and submodule mirrors are cached on the runner and
+#   reused; nothing is downloaded/built again when it is already there.
+# The policy server is NOT started by this workflow. Runner setup: docs/CI_EVAL.md
 name: RoboDojo eval client
 
 on:
@@ -44,7 +47,7 @@ on:
         type: string
         default: "0"
       rebuild_image:
-        description: "Force docker build of the client image"
+        description: "Force docker build of the client image (otherwise reuse cached image)"
         type: boolean
         default: false
   workflow_call:
@@ -64,13 +67,13 @@ on:
       rebuild_image: { type: boolean, default: false }
     outputs:
       tasks:
-        description: "JSON array of evaluated tasks"
-        value: ${{ jobs.prepare.outputs.tasks }}
+        description: "JSON array of tasks whose client was started (or already running)"
+        value: ${{ jobs.start-client.outputs.tasks }}
 
 permissions:
   contents: read
 
-# One GPU eval at a time; queue instead of cancelling.
+# Serialize start requests so two runs never start duplicate clients.
 concurrency:
   group: robodojo-gpu-eval
   cancel-in-progress: false
@@ -101,87 +104,18 @@ env:
   ROBODOJO_BUILD_ARGS: ${{ vars.ROBODOJO_BUILD_ARGS }}
   ROBODOJO_GIT_MIRROR_DIR: ${{ vars.ROBODOJO_GIT_MIRROR_DIR }}
   ROBODOJO_CUROBO_VERSION: ${{ vars.ROBODOJO_CUROBO_VERSION }}
+  ROBODOJO_HF_ENDPOINT: ${{ vars.ROBODOJO_HF_ENDPOINT }}
+  # Persistent results dir on the runner (outside the job workspace, which is wiped).
+  ROBODOJO_OUTPUT_DIR: ${{ vars.ROBODOJO_OUTPUT_DIR }}
 
 jobs:
-  prepare:
-    name: Prepare runner + client image
+  start-client:
+    name: Start eval client (background)
     runs-on: [self-hosted, linux, a100]
     timeout-minutes: 180
     outputs:
       tasks: ${{ steps.resolve.outputs.tasks }}
-      task_count: ${{ steps.resolve.outputs.task_count }}
-    steps:
-      - name: Checkout
-        id: checkout
-        uses: actions/checkout@v4
-        continue-on-error: true
-        timeout-minutes: 6
-        with:
-          submodules: false
-          lfs: false
-
-      - name: Checkout fallback (API tarball)
-        if: steps.checkout.outcome != 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        # The repo is not on disk yet, so this logic must stay inline.
-        run: |
-          set -euo pipefail
-          cd "${GITHUB_WORKSPACE}"
-          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-          api() {
-            curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 \
-              -H "Authorization: Bearer ${GH_TOKEN}" "$@"
-          }
-          api "https://api.github.com/repos/${REPO}/tarball/${SHA}" | tar -xz --strip-components=1
-          # Submodule gitlinks in ls-tree format, for `robodojo_ci.sh fetch-submodules`.
-          api "https://api.github.com/repos/${REPO}/git/trees/${SHA}?recursive=1" \
-            | jq -r '.tree[] | select(.type == "commit") | "160000 commit \(.sha)\t\(.path)"' \
-            > .ci_submodules
-          cat .ci_submodules
-
-      - name: Fetch submodules (with retries)
-        env:
-          GIT_LFS_SKIP_SMUDGE: "1"
-        run: bash scripts/ci/robodojo_ci.sh fetch-submodules
-
-      - name: Validate inputs and resolve tasks
-        id: resolve
-        run: python3 scripts/ci/resolve_eval_inputs.py
-
-      - name: Check policy adapter exists
-        run: |
-          test -f "XPolicyLab/policy/${INPUT_POLICY_NAME}/deploy.py" || {
-            echo "::error::XPolicyLab/policy/${INPUT_POLICY_NAME}/deploy.py not found"; exit 1; }
-
-      - name: Check GPU (host + container)
-        run: bash scripts/ci/robodojo_ci.sh check-gpu
-
-      - name: Ensure client image
-        env:
-          ROBODOJO_REBUILD_IMAGE: ${{ inputs.rebuild_image }}
-        run: bash scripts/ci/robodojo_ci.sh ensure-image
-
-      - name: Check assets
-        run: bash scripts/ci/robodojo_ci.sh check-assets
-
-      - name: Doctor (inside image)
-        run: bash scripts/ci/robodojo_ci.sh doctor
-
-  eval:
-    name: Eval ${{ matrix.task }}
-    needs: prepare
-    runs-on: [self-hosted, linux, a100]
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      max-parallel: 1  # one Isaac Sim per GPU
-      matrix:
-        task: ${{ fromJson(needs.prepare.outputs.tasks) }}
     env:
-      TASK: ${{ matrix.task }}
       POLICY_NAME: ${{ inputs.policy_name }}
       POLICY_HOST: ${{ inputs.policy_host }}
       POLICY_PORT: ${{ inputs.policy_port }}
@@ -191,9 +125,6 @@ jobs:
       ENV_CFG: ${{ inputs.env_cfg || vars.ROBODOJO_ENV_CFG || 'arx_x5' }}
       SEED: ${{ inputs.seed }}
       ENV_GPU: ${{ inputs.env_gpu || vars.ROBODOJO_ENV_GPU || '0' }}
-      ROBODOJO_CONTAINER_NAME: robodojo-client-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.task }}
-      ROBODOJO_OUTPUT_DIR: ${{ github.workspace }}/eval_result
-      ROBODOJO_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout
         id: checkout
@@ -226,101 +157,91 @@ jobs:
             > .ci_submodules
           cat .ci_submodules
 
-      - name: Fetch submodules (with retries)
+      - name: Fetch submodules (local mirrors first)
         env:
           GIT_LFS_SKIP_SMUDGE: "1"
         run: bash scripts/ci/robodojo_ci.sh fetch-submodules
 
-      - name: Re-validate inputs
-        run: python3 scripts/ci/resolve_eval_inputs.py >/dev/null
+      - name: Validate inputs and resolve tasks
+        id: resolve
+        run: python3 scripts/ci/resolve_eval_inputs.py
 
-      - name: Clean previous results in workspace
-        run: rm -rf "${ROBODOJO_OUTPUT_DIR}" && mkdir -p "${ROBODOJO_OUTPUT_DIR}"
-
-      - name: Wait for policy server
-        run: bash scripts/ci/robodojo_ci.sh wait-server
-
-      - name: Run client container
-        run: bash scripts/ci/robodojo_ci.sh run-task
-
-      - name: Cleanup client container
-        if: always()
-        run: bash scripts/ci/robodojo_ci.sh cleanup
-
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: result-${{ matrix.task }}
-          path: ${{ github.workspace }}/eval_result
-          if-no-files-found: warn
-          retention-days: 30
-
-  summarize:
-    name: Summarize
-    needs: [prepare, eval]
-    if: always() && needs.prepare.result == 'success'
-    runs-on: [self-hosted, linux, a100]
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        id: checkout
-        uses: actions/checkout@v4
-        continue-on-error: true
-        timeout-minutes: 6
-        with:
-          submodules: false
-          lfs: false
-
-      - name: Checkout fallback (API tarball)
-        if: steps.checkout.outcome != 'success'
+      - name: Check for already-running client(s)
+        id: existing
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        # The repo is not on disk yet, so this logic must stay inline.
+          TASKS_JSON: ${{ steps.resolve.outputs.tasks }}
         run: |
           set -euo pipefail
-          cd "${GITHUB_WORKSPACE}"
-          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-          api() {
-            curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 \
-              -H "Authorization: Bearer ${GH_TOKEN}" "$@"
-          }
-          api "https://api.github.com/repos/${REPO}/tarball/${SHA}" | tar -xz --strip-components=1
-          # Submodule gitlinks in ls-tree format, for `robodojo_ci.sh fetch-submodules`.
-          api "https://api.github.com/repos/${REPO}/git/trees/${SHA}?recursive=1" \
-            | jq -r '.tree[] | select(.type == "commit") | "160000 commit \(.sha)\t\(.path)"' \
-            > .ci_submodules
-          cat .ci_submodules
-
-      - name: Download results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: result-*
-          path: ${{ runner.temp }}/results
-          merge-multiple: true
-
-      - name: Build summary
-        env:
-          RESULTS_DIR: ${{ runner.temp }}/results
-        run: |
-          mkdir -p "${RESULTS_DIR}"
-          ROBODOJO_REPORT_DIR="${RESULTS_DIR}" bash scripts/ci/robodojo_ci.sh report | tee "${RESULTS_DIR}/ci_report.md"
-          cat "${RESULTS_DIR}/ci_report.md" >> "${GITHUB_STEP_SUMMARY}"
-          if [[ -d "${RESULTS_DIR}/RoboDojo" ]]; then
-            if ROBODOJO_EVAL_ROOT="${RESULTS_DIR}/RoboDojo" python3 scripts/internal/summarize_result.py; then
-              { echo; cat "${RESULTS_DIR}/RoboDojo/_summary.md"; } >> "${GITHUB_STEP_SUMMARY}" || true
+          all_running=true
+          for TASK in $(jq -r '.[]' <<< "${TASKS_JSON}"); do
+            name="robodojo-client-${POLICY_NAME}-${TASK}"
+            state="$(docker inspect -f '{{.State.Status}}' "${name}" 2>/dev/null || true)"
+            if [[ "${state}" == "running" ]]; then
+              TASK="${TASK}" ROBODOJO_CONTAINER_NAME="${name}" bash scripts/ci/robodojo_ci.sh client-status
+              echo "- \`${name}\` already running (started $(docker inspect -f '{{.State.StartedAt}}' "${name}"))" >> "${GITHUB_STEP_SUMMARY}"
             else
-              echo "::warning::summarize_result.py failed (partial results are expected for small runs)"
+              all_running=false
             fi
+          done
+          echo "all_running=${all_running}" >> "${GITHUB_OUTPUT}"
+          if [[ "${all_running}" == "true" ]]; then
+            echo "::notice::All requested eval clients are already running; nothing to start."
           fi
 
-      - name: Upload summary
-        uses: actions/upload-artifact@v4
-        with:
-          name: robodojo-eval-summary
-          path: |
-            ${{ runner.temp }}/results/ci_report.md
-            ${{ runner.temp }}/results/RoboDojo/_summary.md
-          if-no-files-found: warn
+      - name: Check policy adapter exists
+        if: steps.existing.outputs.all_running != 'true'
+        run: |
+          test -f "XPolicyLab/policy/${INPUT_POLICY_NAME}/deploy.py" || {
+            echo "::error::XPolicyLab/policy/${INPUT_POLICY_NAME}/deploy.py not found"; exit 1; }
+
+      - name: Check GPU (host + container)
+        if: steps.existing.outputs.all_running != 'true'
+        run: bash scripts/ci/robodojo_ci.sh check-gpu
+
+      - name: Ensure client image (cached unless rebuild_image)
+        if: steps.existing.outputs.all_running != 'true'
+        env:
+          ROBODOJO_REBUILD_IMAGE: ${{ inputs.rebuild_image }}
+        run: bash scripts/ci/robodojo_ci.sh ensure-image
+
+      - name: Ensure assets (cached; download only if missing)
+        if: steps.existing.outputs.all_running != 'true'
+        run: bash scripts/ci/robodojo_ci.sh ensure-assets
+
+      - name: Check assets
+        if: steps.existing.outputs.all_running != 'true'
+        run: bash scripts/ci/robodojo_ci.sh check-assets
+
+      - name: Wait for policy server
+        if: steps.existing.outputs.all_running != 'true'
+        run: bash scripts/ci/robodojo_ci.sh wait-server
+
+      - name: Start client container(s) in background
+        if: steps.existing.outputs.all_running != 'true'
+        env:
+          TASKS_JSON: ${{ steps.resolve.outputs.tasks }}
+          RUN_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          : "${ROBODOJO_OUTPUT_DIR:=${HOME}/robodojo-eval_result}"
+          export ROBODOJO_OUTPUT_DIR
+          {
+            echo "## RoboDojo eval client"
+            echo
+            echo "| Task | Container | Status |"
+            echo "| --- | --- | --- |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          for TASK in $(jq -r '.[]' <<< "${TASKS_JSON}"); do
+            export TASK
+            export ROBODOJO_CONTAINER_NAME="robodojo-client-${POLICY_NAME}-${TASK}"
+            export ROBODOJO_RUN_ID="${RUN_TAG}"
+            before="$(docker inspect -f '{{.State.Status}}' "${ROBODOJO_CONTAINER_NAME}" 2>/dev/null || true)"
+            bash scripts/ci/robodojo_ci.sh start-client
+            if [[ "${before}" == "running" ]]; then status="already running"; else status="started"; fi
+            echo "| ${TASK} | \`${ROBODOJO_CONTAINER_NAME}\` | ${status} |" >> "${GITHUB_STEP_SUMMARY}"
+          done
+          {
+            echo
+            echo "Results: \`${ROBODOJO_OUTPUT_DIR}\` on runner \`${RUNNER_NAME}\`."
+            echo "Follow: \`docker logs -f <container>\` · Status: \`TASK=<task> ROBODOJO_CONTAINER_NAME=<container> bash scripts/ci/robodojo_ci.sh client-status\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
