@@ -52,6 +52,8 @@ Then set these **repository (or organization) variables**
 | `ROBODOJO_ENV_CFG` | *(optional, `arx_x5`)* | env_cfg stem |
 | `ROBODOJO_ENV_GPU` | *(optional, `0`)* | Isaac Sim GPU id on the runner |
 | `ROBODOJO_IMAGE_TAG` | *(optional, `cuda12.8`)* | Client image `robodojo:<tag>` |
+| `ROBODOJO_CUDA_CHECK_IMAGE` | *(optional)* | CUDA image for the GPU check, e.g. `docker.m.daocloud.io/nvidia/cuda:12.8.1-base-ubuntu22.04` when Docker Hub is blocked |
+| `ROBODOJO_BUILD_ARGS` | *(optional)* | Extra `docker build` args, e.g. `--build-arg CUDA_IMAGE=docker.m.daocloud.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04` |
 
 The custom runner labels are declared in `.github/actionlint.yaml` so `actionlint` accepts them.
 

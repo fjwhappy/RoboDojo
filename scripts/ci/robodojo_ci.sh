@@ -37,6 +37,8 @@ Environment (defaults in brackets):
   ROBODOJO_IMAGE            full image ref, overrides the tag [robodojo:<tag>]
   ROBODOJO_REBUILD_IMAGE    true|false [false]
   ROBODOJO_CUDA_CHECK_IMAGE image for the GPU check [nvidia/cuda:12.8.1-base-ubuntu22.04]
+  ROBODOJO_BUILD_ARGS       extra `docker build` args, whitespace-separated, e.g.
+                            "--build-arg CUDA_IMAGE=<mirror>/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
   ROBODOJO_ASSETS_DIR       persistent Assets dir [<repo>/Assets]
   ROBODOJO_ASSETS_BAKED_DIR Assets path baked into curobo configs [auto-detected]
   ROBODOJO_CACHE_DIR        persistent Isaac/warp cache root [~/.cache/robodojo-ci]
@@ -176,7 +178,11 @@ cmd_ensure_image() {
     done
   fi
   info "Building ${IMAGE} (first build takes ~1 h and ~200 GB)"
-  run docker build -t "${IMAGE}" "${ROOT_DIR}"
+  local build_args=()
+  if [[ -n "${ROBODOJO_BUILD_ARGS:-}" ]]; then
+    read -r -a build_args <<< "${ROBODOJO_BUILD_ARGS}"
+  fi
+  run docker build "${build_args[@]}" -t "${IMAGE}" "${ROOT_DIR}"
 }
 
 cmd_check_assets() {

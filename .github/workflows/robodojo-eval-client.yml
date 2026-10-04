@@ -96,6 +96,9 @@ env:
   ROBODOJO_ASSETS_BAKED_DIR: ${{ vars.ROBODOJO_ASSETS_BAKED_DIR }}
   ROBODOJO_CACHE_DIR: ${{ vars.ROBODOJO_CACHE_DIR }}
   ROBODOJO_IMAGE_TAG: ${{ inputs.image_tag || vars.ROBODOJO_IMAGE_TAG || 'cuda12.8' }}
+  # Optional: base-image / mirror overrides for runners without direct Docker Hub access.
+  ROBODOJO_CUDA_CHECK_IMAGE: ${{ vars.ROBODOJO_CUDA_CHECK_IMAGE }}
+  ROBODOJO_BUILD_ARGS: ${{ vars.ROBODOJO_BUILD_ARGS }}
 
 jobs:
   prepare:
