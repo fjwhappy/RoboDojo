@@ -120,7 +120,10 @@ It does not wait for the evaluation to complete.
 3. **Already running?** If a container `robodojo-client-<policy>-<task>` is running for every
    requested task, prints its status and recent logs, then ends successfully. Nothing else runs.
 4. Otherwise it checks the GPU, then reuses whatever is cached:
-   - **Client image:** `robodojo:<tag>` is built only if it's missing or `rebuild_image` is set.
+   - **Client image:** if `robodojo:<tag>` already exists on the runner, it is used as is.
+     Submodule fetching and `docker build` are skipped entirely, and the policy-adapter and
+     GPU checks run against that image. It is built (after fetching submodules) only if it's
+     missing or `rebuild_image` is set.
    - **Assets:** `ensure-assets` returns immediately when `ROBODOJO_ASSETS_DIR` is complete.
      The marker is `<parent>/.robodojo_assets_complete`, and a manually prepared Assets dir
      also counts. Otherwise it downloads the assets once (resumable, from

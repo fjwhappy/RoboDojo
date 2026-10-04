@@ -157,7 +157,22 @@ jobs:
             > .ci_submodules
           cat .ci_submodules
 
-      - name: Fetch submodules (local mirrors first)
+      - name: Check for cached client image
+        id: image
+        env:
+          ROBODOJO_REBUILD_IMAGE: ${{ inputs.rebuild_image }}
+        run: |
+          image="robodojo:${ROBODOJO_IMAGE_TAG}"
+          if [[ "${ROBODOJO_REBUILD_IMAGE}" != "true" ]] && docker image inspect "${image}" >/dev/null 2>&1; then
+            echo "::notice::Using cached image ${image} ($(docker image inspect -f '{{.Created}}' "${image}")); skipping submodules and build."
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Image ${image} not present (or rebuild requested); it will be built."
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Fetch submodules (only needed to build the image)
+        if: steps.image.outputs.present != 'true'
         env:
           GIT_LFS_SKIP_SMUDGE: "1"
         run: bash scripts/ci/robodojo_ci.sh fetch-submodules
@@ -190,16 +205,27 @@ jobs:
 
       - name: Check policy adapter exists
         if: steps.existing.outputs.all_running != 'true'
+        env:
+          IMAGE_PRESENT: ${{ steps.image.outputs.present }}
         run: |
-          test -f "XPolicyLab/policy/${INPUT_POLICY_NAME}/deploy.py" || {
-            echo "::error::XPolicyLab/policy/${INPUT_POLICY_NAME}/deploy.py not found"; exit 1; }
+          rel="XPolicyLab/policy/${INPUT_POLICY_NAME}/deploy.py"
+          if [[ "${IMAGE_PRESENT}" == "true" ]]; then
+            # The client runs the adapter baked into the image, so check there.
+            docker run --rm --entrypoint test "robodojo:${ROBODOJO_IMAGE_TAG}" -f "/workspace/RoboDojo/${rel}" || {
+              echo "::error::${rel} not found in image robodojo:${ROBODOJO_IMAGE_TAG} (set rebuild_image to refresh it)"; exit 1; }
+          else
+            test -f "${rel}" || { echo "::error::${rel} not found"; exit 1; }
+          fi
 
       - name: Check GPU (host + container)
         if: steps.existing.outputs.all_running != 'true'
+        env:
+          # Reuse the cached client image for the in-container check (no extra pull).
+          ROBODOJO_CUDA_CHECK_IMAGE: ${{ steps.image.outputs.present == 'true' && format('robodojo:{0}', env.ROBODOJO_IMAGE_TAG) || vars.ROBODOJO_CUDA_CHECK_IMAGE }}
         run: bash scripts/ci/robodojo_ci.sh check-gpu
 
-      - name: Ensure client image (cached unless rebuild_image)
-        if: steps.existing.outputs.all_running != 'true'
+      - name: Build client image (only if not cached)
+        if: steps.existing.outputs.all_running != 'true' && steps.image.outputs.present != 'true'
         env:
           ROBODOJO_REBUILD_IMAGE: ${{ inputs.rebuild_image }}
         run: bash scripts/ci/robodojo_ci.sh ensure-image
