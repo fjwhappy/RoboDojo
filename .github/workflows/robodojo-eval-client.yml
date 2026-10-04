@@ -109,11 +109,16 @@ jobs:
       tasks: ${{ steps.resolve.outputs.tasks }}
       task_count: ${{ steps.resolve.outputs.task_count }}
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           lfs: false
+
+      - name: Fetch submodules (with retries)
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: bash scripts/ci/robodojo_ci.sh fetch-submodules
 
       - name: Validate inputs and resolve tasks
         id: resolve
@@ -163,11 +168,16 @@ jobs:
       ROBODOJO_OUTPUT_DIR: ${{ github.workspace }}/eval_result
       ROBODOJO_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           lfs: false
+
+      - name: Fetch submodules (with retries)
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: bash scripts/ci/robodojo_ci.sh fetch-submodules
 
       - name: Re-validate inputs
         run: python3 scripts/ci/resolve_eval_inputs.py >/dev/null

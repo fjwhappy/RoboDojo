@@ -20,6 +20,7 @@ usage() {
 Usage: bash scripts/ci/robodojo_ci.sh <command> [--dry-run]
 
 Commands:
+  fetch-submodules  git submodule update --init --recursive, retried (flaky networks)
   check-gpu      Verify nvidia-smi on the host and GPU access inside a container
   ensure-image   Build robodojo:<tag> if missing (or ROBODOJO_REBUILD_IMAGE=true)
   check-assets   Verify the persistent Assets dir has Robots/Object/Material/Eval_Layout
@@ -152,6 +153,22 @@ build_mounts() {
     [[ "${DRY_RUN}" == "true" ]] || mkdir -p "${host}"
     MOUNTS+=(-v "${host}:${sub#*:}")
   done
+}
+
+cmd_fetch_submodules() {
+  local attempt max="${ROBODOJO_GIT_RETRIES:-5}"
+  for (( attempt = 1; attempt <= max; attempt++ )); do
+    if run env GIT_LFS_SKIP_SMUDGE=1 git -C "${ROOT_DIR}" \
+        -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+        submodule update --init --recursive --depth 1 --jobs 3; then
+      info "Submodules ready"
+      [[ "${DRY_RUN}" == "true" ]] || git -C "${ROOT_DIR}" submodule status
+      return 0
+    fi
+    warn "submodule update failed (attempt ${attempt}/${max}); retrying in $(( attempt * 15 ))s"
+    sleep $(( attempt * 15 ))
+  done
+  error "git submodule update failed after ${max} attempts"
 }
 
 cmd_check_gpu() {
@@ -388,6 +405,7 @@ PY
 }
 
 case "${COMMAND}" in
+  fetch-submodules) cmd_fetch_submodules ;;
   check-gpu) cmd_check_gpu ;;
   ensure-image) cmd_ensure_image ;;
   check-assets) cmd_check_assets ;;
