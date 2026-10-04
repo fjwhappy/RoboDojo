@@ -11,13 +11,13 @@ on:
         type: string
         default: Pi_05
       policy_host:
-        description: "Policy server host reachable from the runner"
+        description: "Policy server IP/hostname as seen from the runner (127.0.0.1 = same machine as the runner)"
         type: string
-        required: true
+        default: 127.0.0.1
       policy_port:
-        description: "Policy server port"
+        description: "Policy server port (the --policy-port given to robodojo.sh server)"
         type: string
-        required: true
+        default: "9999"
       ckpt:
         description: "Checkpoint label recorded in result paths"
         type: string
@@ -50,8 +50,8 @@ on:
   workflow_call:
     inputs:
       policy_name: { type: string, default: Pi_05 }
-      policy_host: { type: string, required: true }
-      policy_port: { type: string, required: true }
+      policy_host: { type: string, default: 127.0.0.1 }
+      policy_port: { type: string, default: "9999" }
       ckpt: { type: string, default: external }
       tasks: { type: string, default: stack_bowls }
       dimension: { type: string, default: "" }

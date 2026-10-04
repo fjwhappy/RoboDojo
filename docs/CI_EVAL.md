@@ -68,7 +68,8 @@ container. Don't move `Assets/` after initializing it, or re-run
 | Input | Default | Notes |
 | --- | --- | --- |
 | `policy_name` | `Pi_05` | Directory under `XPolicyLab/policy/` (needs `deploy.py`) |
-| `policy_host` / `policy_port` | required | Must be reachable from the runner |
+| `policy_host` | `127.0.0.1` | Where the policy server runs, **as seen from the runner** (see below) |
+| `policy_port` | `9999` | The `--policy-port` the server was started with |
 | `ckpt` | `external` | Label recorded in result paths |
 | `tasks` | `stack_bowls` | Comma list; leave empty to use `dimension` |
 | `dimension` | — | `generalization`, `memory`, `precision`, `long-horizon`, `open`, `all` |
@@ -80,6 +81,18 @@ container. Don't move `Assets/` after initializing it, or re-run
 GitHub limits manual (`workflow_dispatch`) runs to 10 inputs, so `env_cfg`, `env_gpu`, and
 `image_tag` come from the repository variables above. When the workflow is called with
 `workflow_call`, they can also be passed as inputs, which take precedence over the variables.
+
+**Choosing `policy_host`.** The client container uses `--network host`, so the address is
+resolved from the runner machine itself:
+
+| Policy server runs on… | `policy_host` |
+| --- | --- |
+| the same machine as the runner (host or a `--network host` container) | `127.0.0.1` (default) |
+| another machine on the LAN | that machine's IP, e.g. `192.168.1.50` (`hostname -I` on it) |
+| a remote/cloud machine | its public IP or DNS name (port must be open in its firewall) |
+
+The server must be started with `--bind-host 0.0.0.0` (the default) to be reachable from
+another machine. Check from the runner with `nc -vz <host> <port>`.
 
 Or from the CLI:
 
