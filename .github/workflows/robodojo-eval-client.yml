@@ -100,7 +100,7 @@ env:
 jobs:
   prepare:
     name: Prepare runner + client image
-    runs-on: [self-hosted, linux, gpu, robodojo]
+    runs-on: [self-hosted, linux, a100]
     timeout-minutes: 180
     outputs:
       tasks: ${{ steps.resolve.outputs.tasks }}
@@ -138,7 +138,7 @@ jobs:
   eval:
     name: Eval ${{ matrix.task }}
     needs: prepare
-    runs-on: [self-hosted, linux, gpu, robodojo]
+    runs-on: [self-hosted, linux, a100]
     timeout-minutes: 240
     strategy:
       fail-fast: false
@@ -195,7 +195,7 @@ jobs:
     name: Summarize
     needs: [prepare, eval]
     if: always() && needs.prepare.result == 'success'
-    runs-on: [self-hosted, linux, robodojo]
+    runs-on: [self-hosted, linux, a100]
     timeout-minutes: 30
     steps:
       - name: Checkout

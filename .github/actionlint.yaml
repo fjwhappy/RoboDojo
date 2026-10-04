@@ -1,5 +1,4 @@
 self-hosted-runner:
   # Custom labels of the self-hosted GPU runner used by robodojo-eval-client.yml (docs/CI_EVAL.md).
   labels:
-    - gpu
-    - robodojo
+    - a100

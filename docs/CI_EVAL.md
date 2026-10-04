@@ -26,7 +26,7 @@ runner:
 
 | Need | Details |
 | --- | --- |
-| Labels | `self-hosted`, `linux`, `gpu`, `robodojo` |
+| Labels | `self-hosted`, `linux`, `a100` |
 | GPU / driver | NVIDIA driver ≥ 570 (CUDA 12.8) |
 | Docker | Docker Engine + NVIDIA Container Toolkit: `sudo bash docker/install_docker_nvidia.sh`; add the runner user to the `docker` group and restart the runner service |
 | Disk | 300 GB+ free (image ≈ 200 GB plus build cache) |
