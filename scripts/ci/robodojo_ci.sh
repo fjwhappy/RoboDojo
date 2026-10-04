@@ -38,6 +38,8 @@ Environment (defaults in brackets):
   ROBODOJO_IMAGE            full image ref, overrides the tag [robodojo:<tag>]
   ROBODOJO_REBUILD_IMAGE    true|false [false]
   ROBODOJO_CUDA_CHECK_IMAGE image for the GPU check [nvidia/cuda:12.8.1-base-ubuntu22.04]
+  ROBODOJO_GIT_MIRROR_DIR   optional dir of bare submodule mirrors (<name>.git) used before GitHub
+  ROBODOJO_GIT_RETRIES      submodule fetch attempts [5]
   ROBODOJO_BUILD_ARGS       extra `docker build` args, whitespace-separated, e.g.
                             "--build-arg CUDA_IMAGE=<mirror>/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
   ROBODOJO_ASSETS_DIR       persistent Assets dir [<repo>/Assets]
@@ -155,14 +157,45 @@ build_mounts() {
   done
 }
 
+# Populate one submodule work tree from a local bare mirror via `git archive`
+# (no network; works with shallow mirrors). Prints nothing on success.
+populate_from_mirror() {
+  local path="$1" sha="$2" mirror="$3" dest="${ROOT_DIR}/$1"
+  git -C "${mirror}" cat-file -e "${sha}^{commit}" 2>/dev/null || return 1
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    echo "[dry-run] git -C ${mirror} archive ${sha} | tar -x -C ${dest}"
+    return 0
+  fi
+  rm -rf "${dest}" && mkdir -p "${dest}"
+  GIT_LFS_SKIP_SMUDGE=1 git -c filter.lfs.smudge= -c filter.lfs.process= -c filter.lfs.required=false \
+    -C "${mirror}" archive --format=tar "${sha}" | tar -x -C "${dest}"
+  printf '%s\n' "${sha}" > "${dest}/.robodojo_ci_commit"
+}
+
 cmd_fetch_submodules() {
+  # Optional: ROBODOJO_GIT_MIRROR_DIR holds bare mirrors named <basename>.git
+  # (XPolicyLab.git, IsaacLab.git, curobo.git). Pinned commits found there are
+  # exported locally; the rest are fetched from their remotes with retries.
+  local mirror_dir="${ROBODOJO_GIT_MIRROR_DIR:-}" mode sha path mirror remaining=()
+  while read -r mode _ sha path; do
+    [[ "${mode}" == "160000" ]] || continue
+    mirror="${mirror_dir%/}/$(basename "${path}").git"
+    if [[ -n "${mirror_dir}" && -d "${mirror}" ]] && populate_from_mirror "${path}" "${sha}" "${mirror}"; then
+      info "Populated ${path} @ ${sha:0:12} from local mirror ${mirror}"
+    else
+      remaining+=("${path}")
+    fi
+  done < <(git -C "${ROOT_DIR}" ls-tree -r HEAD)
+
+  (( ${#remaining[@]} )) || { info "Submodules ready (all from local mirrors)"; return 0; }
+
   local attempt max="${ROBODOJO_GIT_RETRIES:-5}"
   for (( attempt = 1; attempt <= max; attempt++ )); do
     if run env GIT_LFS_SKIP_SMUDGE=1 git -C "${ROOT_DIR}" \
         -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
-        submodule update --init --recursive --depth 1 --jobs 3; then
+        submodule update --init --recursive --jobs 3 -- "${remaining[@]}"; then
       info "Submodules ready"
-      [[ "${DRY_RUN}" == "true" ]] || git -C "${ROOT_DIR}" submodule status
+      [[ "${DRY_RUN}" == "true" ]] || git -C "${ROOT_DIR}" submodule status -- "${remaining[@]}"
       return 0
     fi
     warn "submodule update failed (attempt ${attempt}/${max}); retrying in $(( attempt * 15 ))s"

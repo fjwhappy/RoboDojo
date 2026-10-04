@@ -99,6 +99,7 @@ env:
   # Optional: base-image / mirror overrides for runners without direct Docker Hub access.
   ROBODOJO_CUDA_CHECK_IMAGE: ${{ vars.ROBODOJO_CUDA_CHECK_IMAGE }}
   ROBODOJO_BUILD_ARGS: ${{ vars.ROBODOJO_BUILD_ARGS }}
+  ROBODOJO_GIT_MIRROR_DIR: ${{ vars.ROBODOJO_GIT_MIRROR_DIR }}
 
 jobs:
   prepare:
