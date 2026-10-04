@@ -40,6 +40,7 @@ Environment (defaults in brackets):
   ROBODOJO_CUDA_CHECK_IMAGE image for the GPU check [nvidia/cuda:12.8.1-base-ubuntu22.04]
   ROBODOJO_GIT_MIRROR_DIR   optional dir of bare submodule mirrors (<name>.git) used before GitHub
   ROBODOJO_GIT_RETRIES      submodule fetch attempts [5]
+  ROBODOJO_CUROBO_VERSION   curobo version when built without git metadata [0.0.0+robodojo]
   ROBODOJO_BUILD_ARGS       extra `docker build` args, whitespace-separated, e.g.
                             "--build-arg CUDA_IMAGE=<mirror>/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
   ROBODOJO_ASSETS_DIR       persistent Assets dir [<repo>/Assets]
@@ -172,6 +173,18 @@ populate_from_mirror() {
   printf '%s\n' "${sha}" > "${dest}/.robodojo_ci_commit"
 }
 
+# Submodule gitlinks in `git ls-tree` format. Without a .git dir (API-tarball
+# checkout) they come from ${ROOT_DIR}/.ci_submodules written by the workflow.
+submodule_gitlinks() {
+  if git -C "${ROOT_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "${ROOT_DIR}" ls-tree -r HEAD
+  elif [[ -f "${ROOT_DIR}/.ci_submodules" ]]; then
+    cat "${ROOT_DIR}/.ci_submodules"
+  else
+    error "no git metadata and no .ci_submodules file; cannot resolve submodule commits"
+  fi
+}
+
 cmd_fetch_submodules() {
   # Optional: ROBODOJO_GIT_MIRROR_DIR holds bare mirrors named <basename>.git
   # (XPolicyLab.git, IsaacLab.git, curobo.git). Pinned commits found there are
@@ -185,9 +198,11 @@ cmd_fetch_submodules() {
     else
       remaining+=("${path}")
     fi
-  done < <(git -C "${ROOT_DIR}" ls-tree -r HEAD)
+  done < <(submodule_gitlinks)
 
   (( ${#remaining[@]} )) || { info "Submodules ready (all from local mirrors)"; return 0; }
+  git -C "${ROOT_DIR}" rev-parse --git-dir >/dev/null 2>&1 || \
+    error "cannot fetch ${remaining[*]}: no git checkout (provide mirrors via ROBODOJO_GIT_MIRROR_DIR)"
 
   local attempt max="${ROBODOJO_GIT_RETRIES:-5}"
   for (( attempt = 1; attempt <= max; attempt++ )); do
@@ -231,6 +246,10 @@ cmd_ensure_image() {
   local build_args=()
   if [[ -n "${ROBODOJO_BUILD_ARGS:-}" ]]; then
     read -r -a build_args <<< "${ROBODOJO_BUILD_ARGS}"
+  fi
+  # Submodules exported from mirrors have no git metadata; give setuptools_scm a version.
+  if [[ ! -e "${ROOT_DIR}/third_party/curobo/.git" ]]; then
+    build_args+=(--build-arg "CUROBO_VERSION=${ROBODOJO_CUROBO_VERSION:-0.0.0+robodojo}")
   fi
   run docker build "${build_args[@]}" -t "${IMAGE}" "${ROOT_DIR}"
 }

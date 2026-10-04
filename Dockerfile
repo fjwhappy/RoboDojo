@@ -166,8 +166,12 @@ COPY third_party/ /workspace/RoboDojo/third_party/
 # frameworks (rl_games/rsl_rl/skrl/sb3). RoboDojo eval does not use them, and
 # rl_games is pulled from git+github (unreachable/timeouts on some networks).
 RUN cd third_party/IsaacLab && ./isaaclab.sh --install none
+# CUROBO_VERSION: optional fallback version for setuptools_scm when third_party/curobo
+# was exported without git metadata (e.g. CI from a local mirror); empty = use git.
+ARG CUROBO_VERSION=""
 RUN cd third_party/curobo && \
     python -m pip uninstall -y nvidia-curobo curobo 2>/dev/null || true && \
+    if [ -n "${CUROBO_VERSION}" ]; then export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO="${CUROBO_VERSION}"; fi && \
     python -m pip install -e ".[cu12]" --no-build-isolation
 RUN python -m pip install \
         "numpy==1.26.0" \

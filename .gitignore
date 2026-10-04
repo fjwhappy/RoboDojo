@@ -22,3 +22,6 @@ ignore/
 .cursor/
 .claude/
 Untitled
+
+# CI checkout fallback metadata
+.ci_submodules

@@ -100,6 +100,7 @@ env:
   ROBODOJO_CUDA_CHECK_IMAGE: ${{ vars.ROBODOJO_CUDA_CHECK_IMAGE }}
   ROBODOJO_BUILD_ARGS: ${{ vars.ROBODOJO_BUILD_ARGS }}
   ROBODOJO_GIT_MIRROR_DIR: ${{ vars.ROBODOJO_GIT_MIRROR_DIR }}
+  ROBODOJO_CUROBO_VERSION: ${{ vars.ROBODOJO_CUROBO_VERSION }}
 
 jobs:
   prepare:
@@ -111,10 +112,35 @@ jobs:
       task_count: ${{ steps.resolve.outputs.task_count }}
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 6
         with:
           submodules: false
           lfs: false
+
+      - name: Checkout fallback (API tarball)
+        if: steps.checkout.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        # The repo is not on disk yet, so this logic must stay inline.
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          api() {
+            curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 \
+              -H "Authorization: Bearer ${GH_TOKEN}" "$@"
+          }
+          api "https://api.github.com/repos/${REPO}/tarball/${SHA}" | tar -xz --strip-components=1
+          # Submodule gitlinks in ls-tree format, for `robodojo_ci.sh fetch-submodules`.
+          api "https://api.github.com/repos/${REPO}/git/trees/${SHA}?recursive=1" \
+            | jq -r '.tree[] | select(.type == "commit") | "160000 commit \(.sha)\t\(.path)"' \
+            > .ci_submodules
+          cat .ci_submodules
 
       - name: Fetch submodules (with retries)
         env:
@@ -170,10 +196,35 @@ jobs:
       ROBODOJO_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 6
         with:
           submodules: false
           lfs: false
+
+      - name: Checkout fallback (API tarball)
+        if: steps.checkout.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        # The repo is not on disk yet, so this logic must stay inline.
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          api() {
+            curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 \
+              -H "Authorization: Bearer ${GH_TOKEN}" "$@"
+          }
+          api "https://api.github.com/repos/${REPO}/tarball/${SHA}" | tar -xz --strip-components=1
+          # Submodule gitlinks in ls-tree format, for `robodojo_ci.sh fetch-submodules`.
+          api "https://api.github.com/repos/${REPO}/git/trees/${SHA}?recursive=1" \
+            | jq -r '.tree[] | select(.type == "commit") | "160000 commit \(.sha)\t\(.path)"' \
+            > .ci_submodules
+          cat .ci_submodules
 
       - name: Fetch submodules (with retries)
         env:
@@ -213,10 +264,35 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 6
         with:
           submodules: false
           lfs: false
+
+      - name: Checkout fallback (API tarball)
+        if: steps.checkout.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        # The repo is not on disk yet, so this logic must stay inline.
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          api() {
+            curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 \
+              -H "Authorization: Bearer ${GH_TOKEN}" "$@"
+          }
+          api "https://api.github.com/repos/${REPO}/tarball/${SHA}" | tar -xz --strip-components=1
+          # Submodule gitlinks in ls-tree format, for `robodojo_ci.sh fetch-submodules`.
+          api "https://api.github.com/repos/${REPO}/git/trees/${SHA}?recursive=1" \
+            | jq -r '.tree[] | select(.type == "commit") | "160000 commit \(.sha)\t\(.path)"' \
+            > .ci_submodules
+          cat .ci_submodules
 
       - name: Download results
         uses: actions/download-artifact@v4
