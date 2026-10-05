@@ -171,3 +171,47 @@ bash scripts/ci/robodojo_ci.sh report
 | First run very slow | Cold Warp/Omniverse caches. They persist in `ROBODOJO_CACHE_DIR` after the first run. |
 | OOM | The policy server and Isaac Sim share a GPU. Run the server on another GPU or machine, or set `env_gpu`. |
 | Leftover container after a cancel | `docker ps -a --filter name=robodojo-client-` then `docker rm -f <name>`. The cleanup step does this automatically. |
+
+## 6. Policy server workflow (`robodojo-policy-server.yml`)
+
+Deploys an XPolicyLab policy server, **Pi 0.5 (`Pi_05`) by default**, as a detached container on
+the same runner, prints where it listens, and finishes.
+
+| Input | Default | Notes |
+| --- | --- | --- |
+| `policy_name` | `Pi_05` | Directory under `XPolicyLab/policy/` |
+| `ckpt` | `RoboDojo-sim-arx_x5-joint-0` | Published run dir `ckpt/RoboDojo/<policy>/<ckpt>` on the HF dataset |
+| `task` | `stack_bowls` | Passed to the server |
+| `port` | `9999` | Listening port (host network) |
+| `gpu` | `1` | Host GPU for the server. Isaac Sim (eval client) uses `ROBODOJO_ENV_GPU`, default 0 |
+| `action_type` | `joint` | Must match the checkpoint |
+| `rebuild_image` / `restart` | `false` | Force an image rebuild, or replace a running server |
+
+Steps:
+
+1. **Already running?** If `robodojo-policy-<policy>` is running and its port accepts
+   connections, it prints the container, checkpoint, GPU and **listening address:port**, then
+   finishes.
+2. **Image** `robodojo-policy-<policy>:latest` (`docker/policy/Dockerfile`, uv-managed OpenPI
+   env for Pi_05): it's reused if present. Only when it's missing are submodules fetched and the
+   image built.
+3. **Checkpoint:** `scripts/ci/download_checkpoint.py` fetches only the inference files
+   (`params/`, `assets/`, metadata; it skips `train_state/`, about 12 GB instead of about 70 GB
+   for Pi_05). Each file's sha256 is checked, downloads are resumable, and the result goes to
+   `<ROBODOJO_POLICY_CACHE_DIR>/checkpoints/<policy>/<ckpt>`. A marker file means later runs
+   skip the download.
+4. **Model data** (e.g. OpenPI's tokenizer from GCS) is cached in
+   `<ROBODOJO_POLICY_CACHE_DIR>/model-data/<policy>`, mounted as `OPENPI_DATA_HOME`.
+5. **Start:** runs `docker run -d --restart unless-stopped --gpus device=<gpu> --network host`,
+   waits until the port listens (model loading takes minutes), prints
+   `listening : 0.0.0.0:<port>` plus the client settings, and finishes.
+
+Repository variables: `ROBODOJO_POLICY_CACHE_DIR` (e.g. `/home/sgx_mac/robodojo-policy-cache`),
+`ROBODOJO_POLICY_BUILD_ARGS` (base image and mirrors, same style as `ROBODOJO_BUILD_ARGS`),
+plus the shared `ROBODOJO_HF_ENDPOINT` and `ROBODOJO_GIT_MIRROR_DIR`.
+
+On the runner: `bash scripts/ci/policy_server.sh status|start|stop` (env vars as in `--help`),
+`docker logs -f robodojo-policy-Pi_05`.
+
+Typical flow: run **RoboDojo policy server** (default Pi_05), then **RoboDojo eval client**
+with `policy_name=Pi_05 policy_host=127.0.0.1 policy_port=9999 action_type=joint`.

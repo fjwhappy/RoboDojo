@@ -1,0 +1,184 @@
+# Deploy an XPolicyLab policy server (default: Pi 0.5 / Pi_05) as a detached Docker
+# container on the self-hosted GPU runner, print its listening address and port, and finish.
+# - If the server container is already running and listening: print its info and finish.
+# - Docker image, model checkpoint and model data are cached on the runner and reused;
+#   nothing is downloaded or built again when it is already there.
+# Pair with robodojo-eval-client.yml (policy_host=127.0.0.1, policy_port=<port>).
+# Runner setup: docs/CI_EVAL.md
+name: RoboDojo policy server
+
+on:
+  workflow_dispatch:
+    inputs:
+      policy_name:
+        description: "Policy under XPolicyLab/policy/ (default Pi 0.5)"
+        type: string
+        default: Pi_05
+      ckpt:
+        description: "Checkpoint run dir (published: ckpt/RoboDojo/<policy>/<ckpt> on the HF dataset)"
+        type: string
+        default: RoboDojo-sim-arx_x5-joint-0
+      task:
+        description: "Task name passed to the server"
+        type: string
+        default: stack_bowls
+      port:
+        description: "Listening port"
+        type: string
+        default: "9999"
+      gpu:
+        description: "Host GPU index for the server"
+        type: string
+        default: "1"
+      action_type:
+        description: "Action type of the checkpoint"
+        type: choice
+        options: [joint, ee]
+        default: joint
+      rebuild_image:
+        description: "Force rebuilding the policy image"
+        type: boolean
+        default: false
+      restart:
+        description: "Replace the server if it is already running"
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      policy_name: { type: string, default: Pi_05 }
+      ckpt: { type: string, default: RoboDojo-sim-arx_x5-joint-0 }
+      task: { type: string, default: stack_bowls }
+      port: { type: string, default: "9999" }
+      gpu: { type: string, default: "1" }
+      action_type: { type: string, default: joint }
+      rebuild_image: { type: boolean, default: false }
+      restart: { type: boolean, default: false }
+    outputs:
+      address:
+        description: "Bind address of the server"
+        value: ${{ jobs.server.outputs.address }}
+      port:
+        description: "Listening port"
+        value: ${{ jobs.server.outputs.port }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: robodojo-policy-server-${{ inputs.policy_name }}
+  cancel-in-progress: false
+
+env:
+  # Inputs reach scripts only via env (validated in policy_server.sh).
+  POLICY_NAME: ${{ inputs.policy_name }}
+  CKPT: ${{ inputs.ckpt }}
+  TASK: ${{ inputs.task }}
+  POLICY_PORT: ${{ inputs.port }}
+  POLICY_GPU: ${{ inputs.gpu }}
+  ACTION_TYPE: ${{ inputs.action_type }}
+  REBUILD_IMAGE: ${{ inputs.rebuild_image }}
+  RESTART: ${{ inputs.restart }}
+  # Runner-specific settings (repository variables).
+  ROBODOJO_POLICY_CACHE_DIR: ${{ vars.ROBODOJO_POLICY_CACHE_DIR }}
+  ROBODOJO_HF_ENDPOINT: ${{ vars.ROBODOJO_HF_ENDPOINT }}
+  ROBODOJO_POLICY_BUILD_ARGS: ${{ vars.ROBODOJO_POLICY_BUILD_ARGS }}
+  ROBODOJO_GIT_MIRROR_DIR: ${{ vars.ROBODOJO_GIT_MIRROR_DIR }}
+
+jobs:
+  server:
+    name: Deploy policy server (${{ inputs.policy_name }})
+    runs-on: [self-hosted, linux, a100]
+    timeout-minutes: 240
+    outputs:
+      address: ${{ steps.up.outputs.address || steps.existing.outputs.address }}
+      port: ${{ steps.up.outputs.port || steps.existing.outputs.port }}
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 6
+        with:
+          submodules: false
+          lfs: false
+
+      - name: Checkout fallback (API tarball)
+        if: steps.checkout.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        # The repo is not on disk yet, so this logic must stay inline.
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          api() {
+            curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 \
+              -H "Authorization: Bearer ${GH_TOKEN}" "$@"
+          }
+          api "https://api.github.com/repos/${REPO}/tarball/${SHA}" | tar -xz --strip-components=1
+          api "https://api.github.com/repos/${REPO}/git/trees/${SHA}?recursive=1" \
+            | jq -r '.tree[] | select(.type == "commit") | "160000 commit \(.sha)\t\(.path)"' \
+            > .ci_submodules
+
+      - name: Already running?
+        id: existing
+        run: |
+          if [[ "${RESTART}" != "true" ]] && bash scripts/ci/policy_server.sh status; then
+            echo "running=true" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Policy server ${POLICY_NAME} already running; nothing to do."
+          else
+            echo "running=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Check cached image
+        id: image
+        if: steps.existing.outputs.running != 'true'
+        run: |
+          image="robodojo-policy-${POLICY_NAME,,}:latest"
+          if [[ "${REBUILD_IMAGE}" != "true" ]] && docker image inspect "${image}" >/dev/null 2>&1; then
+            echo "::notice::Using cached image ${image}; skipping submodules and build."
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Fetch submodules (only to build the image)
+        if: steps.existing.outputs.running != 'true' && steps.image.outputs.present != 'true'
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: bash scripts/ci/robodojo_ci.sh fetch-submodules
+
+      - name: Build policy image (only if not cached)
+        if: steps.existing.outputs.running != 'true' && steps.image.outputs.present != 'true'
+        run: bash scripts/ci/policy_server.sh ensure-image
+
+      - name: Ensure checkpoint (cached; download only if missing)
+        if: steps.existing.outputs.running != 'true'
+        run: bash scripts/ci/policy_server.sh ensure-checkpoint
+
+      - name: Start server (detached) and wait until listening
+        id: up
+        if: steps.existing.outputs.running != 'true'
+        run: bash scripts/ci/policy_server.sh start
+
+      - name: Summary
+        if: always()
+        env:
+          ADDRESS: ${{ steps.up.outputs.address || steps.existing.outputs.address }}
+          PORT: ${{ steps.up.outputs.port || steps.existing.outputs.port }}
+          WAS_RUNNING: ${{ steps.existing.outputs.running }}
+        run: |
+          if [[ -n "${PORT}" ]]; then
+            state="started"; [[ "${WAS_RUNNING}" == "true" ]] && state="already running"
+            {
+              echo "## Policy server ${POLICY_NAME}: ${state}"
+              echo
+              echo "- Listening: \`${ADDRESS}:${PORT}\` (ws) on runner \`${RUNNER_NAME}\`"
+              echo "- Container: \`robodojo-policy-${POLICY_NAME}\` · checkpoint \`${CKPT}\` · GPU ${POLICY_GPU}"
+              echo "- Eval client inputs: \`policy_name=${POLICY_NAME} policy_host=127.0.0.1 policy_port=${PORT}\`"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "## Policy server ${POLICY_NAME}: not running" >> "${GITHUB_STEP_SUMMARY}"
+          fi

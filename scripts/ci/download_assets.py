@@ -27,6 +27,14 @@ import time
 import urllib.parse
 import urllib.request
 
+# Some HF mirrors reject the default Python-urllib User-Agent.
+USER_AGENT = "robodojo-ci/1.0"
+
+
+def _request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+
 REPO_ID = "RoboDojo-Benchmark/RoboDojo"
 REQUIRED_SUBDIRS = ("Robots", "Object", "Material", "Eval_Layout")
 MARKER = ".robodojo_assets_complete"
@@ -90,7 +98,7 @@ def fetch(url: str, dest: Path, oid: str, retries: int = 6) -> str | None:
     for attempt in range(retries):
         try:
             h = hashlib.sha256()
-            with urllib.request.urlopen(url, timeout=120) as resp, open(tmp, "wb") as fh:
+            with urllib.request.urlopen(_request(url), timeout=120) as resp, open(tmp, "wb") as fh:
                 while chunk := resp.read(1 << 20):
                     h.update(chunk)
                     fh.write(chunk)
