@@ -36,6 +36,7 @@ BENCH_DIMENSION="${BENCH_DIMENSION:-}"
 BENCH_TAG="${BENCH_TAG:-${POLICY_NAME}-${CKPT}-seed${SEED}}"
 BENCH_ROOT="${BENCH_ROOT:-${HOME}/robodojo-bench}/${BENCH_TAG}"
 TASK_ATTEMPTS="${TASK_ATTEMPTS:-4}"
+BOOT_GAP="${BOOT_GAP:-90}"                 # seconds between eval-client boots across workers
 export SERVER_START_TIMEOUT="${SERVER_START_TIMEOUT:-1800}"
 
 for v in POLICY_NAME CKPT ACTION_TYPE ENV_CFG BENCH_TAG; do
@@ -136,10 +137,17 @@ worker() {  # worker GPU PORT TASKS_CSV EXPECTED_JSON STAGGER_SECONDS
       POLICY_CONTAINER="robodojo-policy-${POLICY_NAME}-g${gpu}" POLICY_PORT="${port}" POLICY_GPU="${gpu}" \
         TASK="${task}" bash "${SCRIPT_DIR}/policy_server.sh" start > "${STATE}/server-g${gpu}.log" 2>&1 || {
           echo "[worker gpu${gpu}] policy server failed to start (attempt ${attempt})"; tail -20 "${STATE}/server-g${gpu}.log"; sleep 30; continue; }
+      # Serialize Isaac Sim boots across workers: concurrent Kit start-ups race
+      # ("Accessed invalid null prim" / "Simulation context already exists").
+      exec 9>"${STATE}/boot.lock"; flock 9
       echo "[worker gpu${gpu}] RUN ${task} (expected ${exp} episodes, attempt ${attempt}) $(date -Is)"
-      if TASK="${task}" POLICY_HOST=127.0.0.1 POLICY_PORT="${port}" ENV_GPU="${gpu}" EVAL_NUM="${exp}" \
-          ROBODOJO_CONTAINER_NAME="robodojo-bench-${POLICY_NAME}-${task}" \
-          bash "${SCRIPT_DIR}/robodojo_ci.sh" run-task > "${STATE}/task-${task}.log" 2>&1; then
+      TASK="${task}" POLICY_HOST=127.0.0.1 POLICY_PORT="${port}" ENV_GPU="${gpu}" EVAL_NUM="${exp}" \
+        ROBODOJO_CONTAINER_NAME="robodojo-bench-${POLICY_NAME}-${task}" \
+        bash "${SCRIPT_DIR}/robodojo_ci.sh" run-task > "${STATE}/task-${task}.log" 2>&1 9>&- &
+      local run_pid=$! run_rc=0
+      sleep "${BOOT_GAP}"; flock -u 9; exec 9>&-
+      wait "${run_pid}" || run_rc=$?
+      if (( run_rc == 0 )); then
         cp -f "${RESULTS}/_ci/${task}/client.log" "${STATE}/client-${task}-a${attempt}.log" 2>/dev/null || true
         if task_done "${task}" "${exp}"; then
           echo "[worker gpu${gpu}] PASS ${task} $(date -Is)"; break
