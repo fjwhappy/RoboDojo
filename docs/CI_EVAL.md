@@ -215,3 +215,22 @@ On the runner: `bash scripts/ci/policy_server.sh status|start|stop` (env vars as
 
 Typical flow: run **RoboDojo policy server** (default Pi_05), then **RoboDojo eval client**
 with `policy_name=Pi_05 policy_host=127.0.0.1 policy_port=9999 action_type=joint`.
+
+## 7. Full benchmark workflow (`robodojo-benchmark.yml`)
+
+Runs the whole RoboDojo benchmark (54 runnable tasks, native episode counts) for one policy,
+**detached** on the multi-GPU runner, via `scripts/ci/run_benchmark.sh`:
+
+- Each GPU in `gpus` gets its own worker: a policy-server container
+  `robodojo-policy-<policy>-g<gpu>` on port `10000+<gpu>`, plus eval-client containers run one
+  task after another on the same GPU. Tasks are balanced across workers by the runtime weights
+  in `scripts/internal/smoke_all_tasks.sh`.
+- **Resumable.** The run id is fixed per `<policy>-<ckpt>-seed<seed>`, so interrupted tasks
+  continue from their resume manifest. Tasks already PASS with the full episode count are
+  skipped. Each task gets up to 3 attempts.
+- `action=launch` starts the run, or just reports progress if it's already running.
+  `action=status` writes progress and, once finished, the results tables to the job summary.
+  `action=stop` stops the run (policy servers keep running).
+- Results: `<ROBODOJO_BENCH_ROOT or ~/robodojo-bench>/<tag>/eval_result`, and the final
+  `summary.md` (PASS table, overall success rate, and the `summarize_result.py` leaderboard tables).
+

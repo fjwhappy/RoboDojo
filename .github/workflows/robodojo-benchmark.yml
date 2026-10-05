@@ -1,0 +1,127 @@
+# Launch (or report on) a full RoboDojo benchmark for one policy on the self-hosted
+# multi-GPU runner. One policy-server container + one eval-client stream per GPU;
+# the run is detached, resumable, and survives this job. Re-running this workflow
+# while a benchmark is in progress only prints its progress.
+# Prerequisites (cached on the runner): client image (robodojo-eval-client.yml),
+# policy image + checkpoint (robodojo-policy-server.yml), Assets. See docs/CI_EVAL.md.
+name: RoboDojo benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "launch = start/resume (no-op if running); status = progress/results; stop"
+        type: choice
+        options: [launch, status, stop]
+        default: launch
+      policy_name:
+        description: "Policy under XPolicyLab/policy/"
+        type: string
+        default: Pi_05
+      ckpt:
+        description: "Checkpoint run dir"
+        type: string
+        default: RoboDojo-sim-arx_x5-joint-0
+      action_type:
+        description: "Action type of the checkpoint"
+        type: choice
+        options: [joint, ee]
+        default: joint
+      gpus:
+        description: "Comma-separated GPU ids (one worker each)"
+        type: string
+        default: "1,2,3,4,5,6,7"
+      tasks:
+        description: "Comma-separated task subset (empty = all 54 runnable tasks)"
+        type: string
+        default: ""
+      eval_num:
+        description: "Episodes per task: 'native' (official counts) or an integer cap"
+        type: string
+        default: native
+      seed:
+        description: "Eval seed"
+        type: string
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: robodojo-benchmark-control
+  cancel-in-progress: false
+
+env:
+  POLICY_NAME: ${{ inputs.policy_name }}
+  CKPT: ${{ inputs.ckpt }}
+  ACTION_TYPE: ${{ inputs.action_type }}
+  BENCH_GPUS: ${{ inputs.gpus }}
+  BENCH_TASKS: ${{ inputs.tasks }}
+  EVAL_NUM: ${{ inputs.eval_num }}
+  SEED: ${{ inputs.seed }}
+  ROBODOJO_ASSETS_DIR: ${{ vars.ROBODOJO_ASSETS_DIR }}
+  ROBODOJO_CACHE_DIR: ${{ vars.ROBODOJO_CACHE_DIR }}
+  ROBODOJO_IMAGE_TAG: ${{ vars.ROBODOJO_IMAGE_TAG || 'cuda12.8' }}
+  ROBODOJO_POLICY_CACHE_DIR: ${{ vars.ROBODOJO_POLICY_CACHE_DIR }}
+  ROBODOJO_HF_ENDPOINT: ${{ vars.ROBODOJO_HF_ENDPOINT }}
+  BENCH_ROOT: ${{ vars.ROBODOJO_BENCH_ROOT }}
+
+jobs:
+  benchmark:
+    name: Benchmark ${{ inputs.action }} (${{ inputs.policy_name }})
+    runs-on: [self-hosted, linux, a100]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 6
+        with:
+          submodules: false
+          lfs: false
+
+      - name: Checkout fallback (API tarball)
+        if: steps.checkout.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${REPO}/tarball/${SHA}" | tar -xz --strip-components=1
+
+      - name: Defaults
+        run: |
+          [[ -n "${BENCH_ROOT}" ]] || echo "BENCH_ROOT=${HOME}/robodojo-bench" >> "${GITHUB_ENV}"
+
+      - name: Check prerequisites (cached images / checkpoint / assets)
+        if: inputs.action == 'launch'
+        run: |
+          set -euo pipefail
+          docker image inspect "robodojo:${ROBODOJO_IMAGE_TAG}" >/dev/null \
+            || { echo "::error::client image robodojo:${ROBODOJO_IMAGE_TAG} missing; run 'RoboDojo eval client' once"; exit 1; }
+          docker image inspect "robodojo-policy-${POLICY_NAME,,}:latest" >/dev/null \
+            || { echo "::error::policy image missing; run 'RoboDojo policy server' once"; exit 1; }
+          bash scripts/ci/policy_server.sh ensure-checkpoint
+          bash scripts/ci/robodojo_ci.sh ensure-assets
+
+      - name: Benchmark ${{ inputs.action }}
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          set -uo pipefail
+          rc=0
+          bash scripts/ci/run_benchmark.sh "${ACTION}" || rc=$?
+          if [[ "${ACTION}" == "status" ]]; then
+            bash scripts/ci/run_benchmark.sh status | tee -a "${GITHUB_STEP_SUMMARY}" || true
+            tag="${POLICY_NAME}-${CKPT}-seed${SEED}"
+            if [[ -f "${BENCH_ROOT}/${tag}/summary.md" ]]; then
+              { echo; cat "${BENCH_ROOT}/${tag}/summary.md"; } >> "${GITHUB_STEP_SUMMARY}"
+            fi
+            exit 0
+          fi
+          exit "${rc}"
