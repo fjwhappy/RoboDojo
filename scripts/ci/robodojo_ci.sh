@@ -376,6 +376,15 @@ cmd_run_task() {
   name="$(container_name)"
   run_id="${ROBODOJO_RUN_ID:-$(date +%Y-%m-%d_%H-%M-%S)}"
   build_mounts
+  # A previous attempt's container may still exist (or still be being removed).
+  if [[ "${DRY_RUN}" != "true" ]]; then
+    docker rm -f "${name}" >/dev/null 2>&1 || true
+    local _w
+    for _w in $(seq 1 30); do
+      docker inspect "${name}" >/dev/null 2>&1 || break
+      sleep 2
+    done
+  fi
 
   local docker_args=(
     docker run --rm --name "${name}"

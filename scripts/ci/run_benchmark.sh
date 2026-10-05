@@ -35,7 +35,8 @@ BENCH_TASKS="${BENCH_TASKS:-}"              # comma list; empty = all runnable t
 BENCH_DIMENSION="${BENCH_DIMENSION:-}"
 BENCH_TAG="${BENCH_TAG:-${POLICY_NAME}-${CKPT}-seed${SEED}}"
 BENCH_ROOT="${BENCH_ROOT:-${HOME}/robodojo-bench}/${BENCH_TAG}"
-TASK_ATTEMPTS="${TASK_ATTEMPTS:-3}"
+TASK_ATTEMPTS="${TASK_ATTEMPTS:-4}"
+export SERVER_START_TIMEOUT="${SERVER_START_TIMEOUT:-1800}"
 
 for v in POLICY_NAME CKPT ACTION_TYPE ENV_CFG BENCH_TAG; do
   [[ "${!v}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || error "invalid ${v}: '${!v}'"
@@ -117,9 +118,11 @@ common_env() {
   export POLICY_NAME CKPT ACTION_TYPE ENV_CFG SEED
 }
 
-worker() {  # worker GPU PORT TASKS_CSV EXPECTED_JSON
-  local gpu="$1" port="$2" tasks_csv="$3" expected="$4" task exp attempt
+worker() {  # worker GPU PORT TASKS_CSV EXPECTED_JSON STAGGER_SECONDS
+  local gpu="$1" port="$2" tasks_csv="$3" expected="$4" stagger="${5:-0}" task exp attempt
   common_env
+  # Stagger Isaac Sim / model start-up across workers (concurrent Kit boots are racy).
+  sleep "${stagger}"
   IFS=',' read -r -a tasks <<< "${tasks_csv}"
   for task in "${tasks[@]}"; do
     [[ -n "${task}" ]] || continue
@@ -137,12 +140,15 @@ worker() {  # worker GPU PORT TASKS_CSV EXPECTED_JSON
       if TASK="${task}" POLICY_HOST=127.0.0.1 POLICY_PORT="${port}" ENV_GPU="${gpu}" EVAL_NUM="${exp}" \
           ROBODOJO_CONTAINER_NAME="robodojo-bench-${POLICY_NAME}-${task}" \
           bash "${SCRIPT_DIR}/robodojo_ci.sh" run-task > "${STATE}/task-${task}.log" 2>&1; then
+        cp -f "${RESULTS}/_ci/${task}/client.log" "${STATE}/client-${task}-a${attempt}.log" 2>/dev/null || true
         if task_done "${task}" "${exp}"; then
           echo "[worker gpu${gpu}] PASS ${task} $(date -Is)"; break
         fi
         echo "[worker gpu${gpu}] PARTIAL ${task}: fewer than ${exp} episodes; resuming"
       else
-        echo "[worker gpu${gpu}] FAIL ${task} (attempt ${attempt}): $(grep -E 'ERROR|Error' "${STATE}/task-${task}.log" | tail -1)"
+        cp -f "${RESULTS}/_ci/${task}/client.log" "${STATE}/client-${task}-a${attempt}.log" 2>/dev/null || true
+        echo "[worker gpu${gpu}] FAIL ${task} (attempt ${attempt}): $(grep -E '\[ERROR\]' "${STATE}/task-${task}.log" | tail -1)"
+        sleep 20
       fi
     done
   done
@@ -199,6 +205,7 @@ cmd_status() {
 }
 
 cmd_run() {
+  unset GITHUB_OUTPUT GITHUB_ENV GITHUB_STEP_SUMMARY GITHUB_PATH GITHUB_STATE
   mkdir -p "${RESULTS}" "${STATE}"
   rm -f "${STATE}/stop"
   echo $$ > "${PIDFILE}"
@@ -212,7 +219,7 @@ cmd_run() {
   local pids=()
   for i in "${!gpus[@]}"; do
     echo "[orchestrator] gpu${gpus[i]} port $((BENCH_BASE_PORT + gpus[i])): ${groups[i]}"
-    worker "${gpus[i]}" "$((BENCH_BASE_PORT + gpus[i]))" "${groups[i]}" "${expected}" &
+    worker "${gpus[i]}" "$((BENCH_BASE_PORT + gpus[i]))" "${groups[i]}" "${expected}" "$((i * ${BENCH_STAGGER:-60}))" &
     pids+=("$!")
   done
   for p in "${pids[@]}"; do wait "${p}" || true; done
@@ -234,7 +241,8 @@ cmd_launch() {
   cp -r "${REPO_DIR}/task/RoboDojo/config" "${REPO_DIR}/task/RoboDojo/tasks" "${REPO_DIR}/task/RoboDojo/task_registry.py" "${snap}/task/RoboDojo/" 2>/dev/null || true
   touch "${snap}/task/__init__.py" "${snap}/task/RoboDojo/__init__.py"
   # RUNNER_TRACKING_ID= keeps the GitHub runner from killing it when the job ends.
-  RUNNER_TRACKING_ID="" setsid nohup env \
+  # The orchestrator outlives the CI job: drop the job's GITHUB_* file handles.
+  RUNNER_TRACKING_ID="" setsid nohup env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_STEP_SUMMARY -u GITHUB_PATH -u GITHUB_STATE \
     POLICY_NAME="${POLICY_NAME}" CKPT="${CKPT}" ACTION_TYPE="${ACTION_TYPE}" ENV_CFG="${ENV_CFG}" SEED="${SEED}" \
     EVAL_NUM="${EVAL_NUM}" BENCH_GPUS="${BENCH_GPUS}" BENCH_BASE_PORT="${BENCH_BASE_PORT}" \
     BENCH_TASKS="${BENCH_TASKS}" BENCH_DIMENSION="${BENCH_DIMENSION}" BENCH_TAG="${BENCH_TAG}" \
