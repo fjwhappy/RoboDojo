@@ -85,7 +85,7 @@ COPY XPolicyLab/ XPolicyLab/
 RUN cd "XPolicyLab/policy/${POLICY}" && \
     venv="" && for d in openpi/.venv .venv; do [ -d "$d" ] && { venv="$d"; break; }; done; \
     if [ -n "${venv}" ]; then \
-        uv pip install --python "${venv}/bin/python" --no-deps -e /workspace/RoboDojo/XPolicyLab && \
+        uv pip install --python "${venv}/bin/python" -e /workspace/RoboDojo/XPolicyLab && \
         "${venv}/bin/python" -c "import XPolicyLab; print('XPolicyLab ok')" ; \
     fi && \
     rm -rf /root/.cache/uv
