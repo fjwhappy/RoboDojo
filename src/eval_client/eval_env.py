@@ -14,6 +14,7 @@ from env.global_configs import *
 from env.global_configs import BENCHMARK
 from env.observation_manager.obs_manager import ObsManager
 from env.seed_manager.seed_manager import SeedManager
+from src.eval_client.camera_health import CameraHealthMonitor
 from utils.cluttered_generator import UnStableError
 from utils.pipeline_utils import get_robot_action_dim_info
 from utils.save_file import VideoStreamWriter, format_video_saved_message, save_json
@@ -118,6 +119,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             # Replaces the old full-episode frame cache; only vision frames are
             # streamed to disk as they arrive instead of buffered in RAM.
             self.video_writers: dict[int, dict[str, VideoStreamWriter]] = {}
+            self.camera_health = CameraHealthMonitor()
+            self.camera_invalid_nums = 0
             self.episode_nums = self.num_envs
             self.unstable_nums = 0
             self.unstable_envs: set[int] = set()
@@ -223,6 +226,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             self._abort_video_writers()
             self.episode_nums = len(real_indices)
             self.unstable_envs = set()
+            self.camera_health.reset()
 
             self.current_env_seed_map = {}
             for idx in range(self.num_envs):
@@ -279,6 +283,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             for env_idx in env_idx_list:
                 if not self.end_flag[env_idx] or last_frame:
                     self._stream_vision(env_idx, data[env_idx])
+                    self.camera_health.update(env_idx, data[env_idx])
                 env_data = deepcopy(data[env_idx])
                 env_data["env_idx"] = env_idx
                 data_list.append(env_data)
@@ -783,6 +788,14 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 self.eval_one_episode()
             success = 0
             process_scores = self.reward_manager.get_score() if hasattr(self, "get_score") else None
+            camera_reports = {}
+            if self.camera_health.enabled:
+                for env_idx in exist_envs:
+                    summary, bad_cams = self.camera_health.report(env_idx, self.task_name)
+                    camera_reports[env_idx] = (summary, bad_cams)
+                    if bad_cams and self.camera_health.strict and env_idx not in self.unstable_envs:
+                        self.mark_env_unstable(env_idx)
+                        self.camera_invalid_nums += 1
             # Envs flagged unstable during the episode (e.g. make_kong's
             # support-arm discard failed to knock the target tile down) are not
             # valid eval samples: skip their videos and exclude them from the
@@ -815,6 +828,10 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     "success": bool(self.success[env_idx]),
                     "score": episode_score,
                 }
+                if env_idx in camera_reports:
+                    summary, bad_cams = camera_reports[env_idx]
+                    self.eval_result["details"][index]["camera_health"] = summary
+                    self.eval_result["details"][index]["bad_cameras"] = bad_cams
                 video_path = os.path.join(self.save_dir, f"episode_{index:07d}.mp4")
                 self.save_video(env_idx, video_path, tag)
 
@@ -829,6 +846,9 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 self.eval_result["success_rate"] = self.success_nums / eval_time
                 self.eval_result["score"] = self.total_score / eval_time * 100
             self.eval_result["eval_time"] = eval_time
+            if self.camera_health.enabled:
+                self.eval_result["camera_check"] = self.camera_health.mode
+                self.eval_result["camera_invalid_nums"] = self.camera_invalid_nums
             save_json(self.eval_result, os.path.join(self.save_dir, "_result.json"))
             # Refresh the resume manifest at the end of every batch so that a
             # downstream SIGABRT (which beats the in-process PhysXFatalError
