@@ -263,6 +263,12 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 raise UnStableError("All scene Unstable Error!")
             for _ in range(10):
                 self.render()
+            # Concurrent Isaac Sim processes sometimes create a tiled render
+            # product with permanently black tiles; rebuild those before eval.
+            repair = self.capture_manager.repair_dark_cameras(self.render)
+            repaired = {k: v for k, v in repair.items() if v.get("rebuilds") or v.get("dark_envs")}
+            if repaired:
+                self.eval_result.setdefault("camera_repairs", []).append(repaired)
             for idx in range(200):
                 self.sim_step()
                 if idx % 5 == 0:
