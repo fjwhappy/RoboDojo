@@ -146,6 +146,7 @@ def wait_for_latest_cameras(
     max_passes = max(required, int(max_passes))
 
     last_stamp = dispatcher_time()
+    start_stamp = last_stamp
     delivered = 0
     passes = 0
     while passes < max_passes:
@@ -160,4 +161,17 @@ def wait_for_latest_cameras(
         last_stamp = stamp
         if delivered >= required:
             break
+    global last_sync_info
+    last_sync_info = {
+        "passes": passes,
+        "delivered": delivered,
+        "required": required,
+        "timed_out": delivered < required,
+        "stamp_start": start_stamp,
+        "stamp_end": last_stamp,
+    }
     return passes
+
+
+# Diagnostics from the most recent wait_for_latest_cameras call.
+last_sync_info: dict = {}

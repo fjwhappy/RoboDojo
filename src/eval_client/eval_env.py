@@ -4,6 +4,7 @@ import importlib
 import inspect
 import json
 import os
+import time
 
 from client_server.ws.model_client import WsModelClient
 import numpy as np
@@ -15,6 +16,7 @@ from env.global_configs import BENCHMARK
 from env.observation_manager.obs_manager import ObsManager
 from env.seed_manager.seed_manager import SeedManager
 from src.eval_client.camera_health import CameraHealthMonitor
+from src.eval_client.capture_trace import CaptureTrace
 from utils.cluttered_generator import UnStableError
 from utils.pipeline_utils import get_robot_action_dim_info
 from utils.save_file import VideoStreamWriter, format_video_saved_message, save_json
@@ -120,6 +122,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             # streamed to disk as they arrive instead of buffered in RAM.
             self.video_writers: dict[int, dict[str, VideoStreamWriter]] = {}
             self.camera_health = CameraHealthMonitor()
+            self.capture_trace = CaptureTrace(self.task_name, self.run_id)
             self.camera_invalid_nums = 0
             self.episode_nums = self.num_envs
             self.unstable_nums = 0
@@ -200,6 +203,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             self.robot_action_dim_info = get_robot_action_dim_info(env_cfg=self.eval_cfg)
 
         def close(self):
+            self.capture_trace.close()
             self._abort_video_writers()
             self.obs_manager.reset()
             super().close()
@@ -277,8 +281,11 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 env_idx_list = list(range(self.num_envs))
             if self.physx_monitor_enabled:
                 self._check_endpose_finite(env_idx_list)
+            t0 = time.perf_counter()
             self.obs_manager.render_for_capture()
+            render_seconds = time.perf_counter() - t0
             data = self.obs_manager.get_obs(env_idx_list=env_idx_list)
+            self.capture_trace.record(self, data, env_idx_list, render_seconds)
             data_list = []
             for env_idx in env_idx_list:
                 if not self.end_flag[env_idx] or last_frame:

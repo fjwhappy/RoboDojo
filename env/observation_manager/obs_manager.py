@@ -1,4 +1,5 @@
 from copy import deepcopy
+import os
 from typing import List
 
 import numpy as np
@@ -38,8 +39,12 @@ class ObsManager:
         # Frames the SDG dispatcher must deliver after the physics step before
         # images are read. One is exact with the zero-delay Kit settings that
         # the entrypoints enable; render_sync adds one more if they are absent.
-        self.capture_render_passes = int(self.obs_config.get("capture_render_passes", 1))
-        self.capture_render_max_passes = int(self.obs_config.get("capture_render_max_passes", 16))
+        self.capture_render_passes = int(
+            os.environ.get("ROBODOJO_CAPTURE_RENDER_PASSES") or self.obs_config.get("capture_render_passes", 1)
+        )
+        self.capture_render_max_passes = int(
+            os.environ.get("ROBODOJO_CAPTURE_RENDER_MAX_PASSES") or self.obs_config.get("capture_render_max_passes", 16)
+        )
         if self.collect_freq > 0:
             self.collect_interval = 1.0 / (self.dt * self.collect_freq)
         else:
